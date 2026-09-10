@@ -1,0 +1,107 @@
+name: opi5max-panthor-build
+
+# Build an Orange Pi 5 Max (RK3588) Ubuntu image from the MAINLINE stack:
+#   - linux-7.2.y kernel (CONFIG_DRM_PANTHOR, no vendor Mali bifrost)
+#   - Mesa (panfrost gallium + PanVK) built from source
+#   - Ubuntu "resolute" server rootfs
+# Runs on a native arm64 GitHub-hosted runner (fast network, no emulation).
+#
+# Trigger manually (Actions tab -> "opi5max-panthor-build" -> Run workflow),
+# or push to the opi5max-panthor branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mesa_source:
+        description: 'Mesa source: upstream = freedesktop staging/26.0, ubuntu = distro mesa'
+        required: true
+        default: 'upstream'
+        type: choice
+        options:
+          - upstream
+          - ubuntu
+  push:
+    branches:
+      - opi5max-panthor
+
+permissions:
+  contents: write   # needed to publish a Release
+
+jobs:
+  build:
+    name: Orange Pi 5 Max mainline (Panthor) image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare build tree
+        run: |
+          mkdir -p build/overlay build/kernel build/images
+          cp *.sh build/
+          cp my-add.txt build/overlay/
+          # mesa-build-env.sh does: cp staging_panthor_mesa.sh overlay/libdrm-amdgpu1.symbols.patch $1
+          # so the symbols patch MUST live in build/overlay/ (it runs with set -eE).
+          cp libdrm-amdgpu1.symbols.patch build/overlay/
+          cd build
+          chmod +x *.sh
+
+      - name: Build Max image (U-Boot + linux-7.2.y kernel + Mesa + rootfs + disk image)
+        env:
+          mesa_source: ${{ github.event.inputs.mesa_source || 'upstream' }}
+        run: |
+          cd build
+          ./build-opi5max.sh "$mesa_source"
+
+      - name: Fix artifact ownership (build ran under sudo/root)
+        run: sudo chown -R runner:runner build/overlay build/images build/kernel || true
+
+      - name: Kernel .config audit (Panthor / DRM / redroid deps) — checklist Gate 0 evidence
+        run: |
+          cd build
+          if [ -f overlay/kernel-built-.config ]; then
+            ./check-kernel-config.sh overlay/kernel-built-.config 2>&1 | tee overlay/kernel-config-audit.txt || true
+          else
+            echo "no kernel .config captured" | tee overlay/kernel-config-audit.txt
+          fi
+
+      - name: Summarize artifacts
+        run: |
+          echo "===== images =====";     ls -lh build/images/  || true
+          echo "===== overlay =====";    ls -lh build/overlay/ || true
+          echo "===== kernel debs =====";ls -lh build/kernel/  || true
+          echo "===== build-versions.txt ====="; cat build/overlay/build-versions.txt || true
+          echo "===== kernel-config-audit (tail) ====="; tail -40 build/overlay/kernel-config-audit.txt || true
+
+      - name: Upload image + manifests + kernel audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: opi5max-panthor-image
+          path: |
+            build/images/*.img.xz
+            build/overlay/build-versions.txt
+            build/overlay/kernel-built-.config
+            build/overlay/kernel-config-audit.txt
+            build/overlay/orangepi-5-MAX-u-boot-rockchip.bin
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Create Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: opi5max-panthor-${{ github.run_number }}
+          name: Orange Pi 5 Max Panthor image (run ${{ github.run_number }})
+          body: |
+            Orange Pi 5 Max (RK3588) Ubuntu image built from the mainline Panthor/PanVK stack.
+
+            - Mesa source: `${{ github.event.inputs.mesa_source }}`
+            - Kernel / U-Boot / rkbin commits: see `build-versions.txt`
+            - Kernel config audit (Panthor etc.): see `kernel-config-audit.txt`
+          draft: false
+          prerelease: true
+          files: |
+            build/images/*.img.xz
+            build/overlay/build-versions.txt
+            build/overlay/kernel-config-audit.txt

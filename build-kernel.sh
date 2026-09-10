@@ -31,6 +31,12 @@ cd ..
 git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git -b linux-7.2.y
 
 cd linux
+# Record the exact Linux source used (README says 7.1 but this pulls linux-7.2.y).
+{
+	echo "linux-branch: linux-7.2.y"
+	echo "linux-commit: $(git rev-parse HEAD)"
+	echo "linux-describe: $(git describe 2>/dev/null || echo unknown)"
+} >> /build-versions.txt
 # minimyth2 patch
 for i in ../minimyth2/*.patch
 do

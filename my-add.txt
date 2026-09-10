@@ -407,6 +407,24 @@ CONFIG_DRM_PANEL_SITRONIX_ST7703=n
 CONFIG_DRM_PANEL_TRULY_NT35597_WQXGA=n
 CONFIG_DRM_PANEL_VISIONOX_VTDR6130=n
 
+# ============================================================
+# Orange Pi 5 Max (RK3588 / Mali-G610, Valhall CSF) mainline GPU stack.
+# Panthor is the mainline DRM driver for CSF GPUs such as the G610; Panfrost
+# is the JM driver for older Mali and will NOT bind G610. These values match
+# the Arch aarch64 base config and are pinned here so the build stays
+# deterministic (移植清单 Section E / Gate 0). Verified by check-kernel-config.sh.
+# ============================================================
+CONFIG_DRM=y
+CONFIG_DRM_SCHED=m
+CONFIG_DRM_PANTHOR=m
+CONFIG_DRM_ROCKCHIP=m
+CONFIG_ROCKCHIP_VOP2=y
+# reDroid container-host essentials: binder built-in + PSI (pinned for determinism)
+CONFIG_ANDROID_BINDER_IPC=y
+CONFIG_ANDROID_BINDERFS=y
+CONFIG_PSI=y
+CONFIG_OVERLAY_FS=m
+
 # HD-Audio 不要（Rockchip は SoC内蔵 I2S/TDM で処理）
 CONFIG_SND_HDA=n
 CONFIG_SND_HDA_INTEL=n

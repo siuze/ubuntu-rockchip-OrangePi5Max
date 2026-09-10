@@ -123,12 +123,67 @@ systemd-nspawn -D $1 \
   sudo apt-get -y install ubuntu-desktop-minimal gdm3 linux-firmware oem-config-gtk ubiquity-frontend-gtk ubiquity-slideshow-ubuntu yaru-theme-unity yaru-theme-icon yaru-theme-gtk aptdaemon initramfs-tools vim cloud-guest-utils e2fsprogs sudo"
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y gstreamer1.0-plugins-bad gstreamer1.0-plugins-good gstreamer1.0-tools clapper mpv vulkan-tools mesa-utils"
 
+# --- Networking / Bluetooth / container runtime (explicit, per porting checklist Section F) ---
+# Do not rely on the desktop meta-package to pull these in by accident.
+systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y \
+  network-manager wpasupplicant wireless-tools iw bluez rfkill \
+  docker.io containerd"
+# Compose plugin name differs across releases; install whichever exists.
+systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin || true"
+
+# Enable services offline (systemctl enable only creates symlinks, no init needed).
+systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "\
+  sudo systemctl enable NetworkManager.service bluetooth.service docker.service || true"
+
+# Host IPv4/IPv6 forwarding must be on for Docker bridge/NAT and reDroid.
+cat > $1/etc/sysctl.d/99-redroid-forwarding.conf << 'EOF'
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+
+# Auto-mount binderfs for reDroid via a systemd unit (disk_image.sh rewrites
+# /etc/fstab, so an fstab entry would be lost; a mount unit survives).
+mkdir -p $1/dev/binderfs
+cat > $1/etc/modules-load.d/panthor.conf << 'EOF'
+# Panthor (CONFIG_DRM_PANTHOR=m) is the mainline DRM driver for the RK3588
+# Mali-G610 (Valhall CSF). Load it early so /dev/dri/renderD* exists before
+# reDroid's gpu_config.sh probes for a host GPU. binder / binderfs are built
+# into this kernel (CONFIG_ANDROID_BINDER_IPC=y / _BINDERFS=y), so no binder
+# module is listed here; only the binderfs mount unit below is required.
+panthor
+EOF
+cat > $1/etc/systemd/system/dev-binderfs.mount << 'EOF'
+[Unit]
+Description=Android binderfs (reDroid)
+DefaultDependencies=no
+Before=multi-user.target
+
+[Mount]
+What=binder
+Where=/dev/binderfs
+Type=binderfs
+Options=defaults
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo systemctl enable dev-binderfs.mount || true"
+
+# AP6611 (BCM43711) Wi-Fi/BT firmware: linux-firmware (installed above) ships the
+# brcmfmac blobs, but board-specific NVRAM/CLM and the BT hcd (e.g. SYN43711A0.hcd)
+# may be vendor-supplied. Drop them into overlay/board-firmware/ to install them.
+if [ -d overlay/board-firmware ]; then
+	mkdir -p $1/lib/firmware
+	cp -a overlay/board-firmware/. $1/lib/firmware/
+	echo "Installed board firmware from overlay/board-firmware/"
+fi
+
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get -y purge cloud-init flash-kernel fwupd nano grub-efi-arm64
 
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get update
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get -y upgrade
 
-sed -i 's/#EXTRA_GROUPS=.*/EXTRA_GROUPS="video"/g' $1/etc/adduser.conf
+sed -i 's/#EXTRA_GROUPS=.*/EXTRA_GROUPS="video render docker"/g' $1/etc/adduser.conf
 sed -i 's/#ADD_EXTRA_GROUPS=.*/ADD_EXTRA_GROUPS=1/g' $1/etc/adduser.conf
 
 

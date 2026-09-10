@@ -96,6 +96,15 @@ cp arm64/*.deb kernel
 cp arm64/2-config.txt overlay
 fi
 
+# Aggregate the exact source commits for this board into the shared build log.
+if [ -f arm64/build-versions.txt ]; then
+	{
+		echo "### build_kernel_env: defconfig=$1 mode=$4 $(date -u +%FT%TZ)"
+		cat arm64/build-versions.txt
+		echo ""
+	} >> overlay/build-versions.txt
+fi
+
 if [ $mem_size -gt 13 ]; then
         sudo umount arm64
 	sleep 2

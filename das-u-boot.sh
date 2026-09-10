@@ -27,7 +27,16 @@ echo ""
 			cd ..
 			exit 1
 		fi
-
+	
+	# Record the exact U-Boot / rkbin sources used for this board so the build
+	# log documents the real commits (do not assume master == pinned tag).
+	{
+		echo "u-boot-defconfig: $1"
+		echo "u-boot-commit: $(git rev-parse HEAD)"
+		echo "u-boot-describe: $(git describe --tags 2>/dev/null || echo unknown)"
+		echo "rkbin-commit: $(git -C ../rkbin rev-parse HEAD 2>/dev/null || echo unknown)"
+	} >> /build-versions.txt
+	
 	echo 'CONFIG_SYS_SOC="rk3588"' >> configs/$1
 sed -i 's/#ifndef CONFIG_XPL_BUILD/#ifndef CONFIG_XPL_BUILD\n\n #define BOOT_TARGETS    "nvme scsi"\n\n/' include/configs/rockchip-common.h
 
