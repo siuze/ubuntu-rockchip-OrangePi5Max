@@ -1,19 +1,22 @@
 name: opi5max-panthor-build
 
-# Build an Orange Pi 5 Max (RK3588) Ubuntu image from the MAINLINE stack:
-#   - linux-7.2.y kernel (CONFIG_DRM_PANTHOR, no vendor Mali bifrost)
+# Build an Orange Pi 5 Max (RK3588) Ubuntu 26.04 (resolute) image from the
+# MAINLINE stack:
+#   - linux-7.2.y kernel (CONFIG_DRM_PANTHOR=m, no vendor Mali bifrost)
 #   - Mesa (panfrost gallium + PanVK) built from source
-#   - Ubuntu "resolute" server rootfs
+#   - Ubuntu "resolute" (26.04) server rootfs
 # Runs on a native arm64 GitHub-hosted runner (fast network, no emulation).
 #
-# Trigger manually (Actions tab -> "opi5max-panthor-build" -> Run workflow),
-# or push to the opi5max-panthor branch.
+# Every run publishes a PUBLIC Release containing the image + manifests + the
+# full build.log, so results are retrievable without repo admin rights.
+#
+# Trigger: push to the opi5max-panthor branch, or manual workflow_dispatch.
 
 on:
   workflow_dispatch:
     inputs:
       mesa_source:
-        description: 'Mesa source: upstream = freedesktop staging/26.0, ubuntu = distro mesa'
+        description: 'Mesa source: upstream = Debian mesa 26.1.6, ubuntu = distro mesa'
         required: true
         default: 'upstream'
         type: choice
@@ -25,7 +28,7 @@ on:
       - opi5max-panthor
 
 permissions:
-  contents: write   # needed to publish a Release
+  contents: write   # publish a Release
 
 jobs:
   build:
@@ -52,29 +55,35 @@ jobs:
           mesa_source: ${{ github.event.inputs.mesa_source || 'upstream' }}
         run: |
           cd build
-          ./build-opi5max.sh "$mesa_source"
+          set -o pipefail
+          ./build-opi5max.sh "$mesa_source" 2>&1 | tee build.log
 
       - name: Fix artifact ownership (build ran under sudo/root)
-        run: sudo chown -R runner:runner build/overlay build/images build/kernel || true
+        if: always()
+        run: sudo chown -R runner:runner build/overlay build/images build/kernel build/build.log 2>/dev/null || true
 
       - name: Kernel .config audit (Panthor / DRM / redroid deps) — checklist Gate 0 evidence
+        if: always()
         run: |
           cd build
           if [ -f overlay/kernel-built-.config ]; then
             ./check-kernel-config.sh overlay/kernel-built-.config 2>&1 | tee overlay/kernel-config-audit.txt || true
           else
-            echo "no kernel .config captured" | tee overlay/kernel-config-audit.txt
+            echo "no kernel .config captured (build likely failed before the kernel step)" | tee overlay/kernel-config-audit.txt
           fi
 
       - name: Summarize artifacts
+        if: always()
         run: |
           echo "===== images =====";     ls -lh build/images/  || true
           echo "===== overlay =====";    ls -lh build/overlay/ || true
           echo "===== kernel debs =====";ls -lh build/kernel/  || true
           echo "===== build-versions.txt ====="; cat build/overlay/build-versions.txt || true
           echo "===== kernel-config-audit (tail) ====="; tail -40 build/overlay/kernel-config-audit.txt || true
+          echo "===== build.log (tail) ====="; tail -60 build/build.log || true
 
-      - name: Upload image + manifests + kernel audit
+      - name: Upload artifacts (image + manifests + logs)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: opi5max-panthor-image
@@ -84,24 +93,34 @@ jobs:
             build/overlay/kernel-built-.config
             build/overlay/kernel-config-audit.txt
             build/overlay/orangepi-5-MAX-u-boot-rockchip.bin
+            build/build.log
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Create Release
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      # Publish on EVERY run (success -> image+manifests+log; failure -> at least
+      # build.log) so results are downloadable without repo admin rights.
+      - name: Publish Release (public, retrievable without auth)
+        if: always()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: opi5max-panthor-${{ github.run_number }}
-          name: Orange Pi 5 Max Panthor image (run ${{ github.run_number }})
+          name: Orange Pi 5 Max Panthor image (run ${{ github.run_number }} / ${{ github.run_attempt }})
           body: |
-            Orange Pi 5 Max (RK3588) Ubuntu image built from the mainline Panthor/PanVK stack.
+            Orange Pi 5 Max (RK3588) Ubuntu 26.04 (resolute) image, mainline Panthor/PanVK stack.
 
-            - Mesa source: `${{ github.event.inputs.mesa_source }}`
-            - Kernel / U-Boot / rkbin commits: see `build-versions.txt`
-            - Kernel config audit (Panthor etc.): see `kernel-config-audit.txt`
+            - Job conclusion: `${{ job.status }}`
+            - Mesa source: `${{ github.event.inputs.mesa_source || 'upstream' }}`
+            - Commit: `${{ github.sha }}`
+            - `build-versions.txt`: exact linux / u-boot / rkbin commit SHAs
+            - `kernel-config-audit.txt`: Panthor / DRM / reDroid kernel-config check (Gate 0)
+            - `build.log`: full build output (present even on failure)
+            - `*.img.xz`: the disk image (present only on success)
           draft: false
           prerelease: true
+          fail_on_unmatched_files: false
           files: |
             build/images/*.img.xz
             build/overlay/build-versions.txt
             build/overlay/kernel-config-audit.txt
+            build/overlay/orangepi-5-MAX-u-boot-rockchip.bin
+            build/build.log
