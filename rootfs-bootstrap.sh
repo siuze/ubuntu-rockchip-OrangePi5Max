@@ -125,8 +125,12 @@ systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt
 
 # --- Networking / Bluetooth / container runtime (explicit, per porting checklist Section F) ---
 # Do not rely on the desktop meta-package to pull these in by accident.
+# NOTE: wireless-tools (ifconfig/iwconfig) is obsolete and has NO installation
+# candidate in Ubuntu 26.04 (resolute); `iw` (below) + iproute2 (in base) fully
+# supersede it for the AP6611 Wi-Fi/BT bring-up. Verified present in resolute:
+# network-manager wpasupplicant iw bluez rfkill docker.io containerd.
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y \
-  network-manager wpasupplicant wireless-tools iw bluez rfkill \
+  network-manager wpasupplicant iw bluez rfkill \
   docker.io containerd"
 # Compose plugin name differs across releases; install whichever exists.
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin || true"

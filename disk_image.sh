@@ -125,17 +125,17 @@ dtbs_install_path="/usr/lib/linux-image-"
 
 # Fail immediately if this board's DTB was not produced by the shared kernel
 # build, so we never silently ship an image that boots another board's DTB.
-dtb_dir="${mount_point}/writable${dtbs_install_path}${kernel_version}"
-dtb_path="${dtb_dir}/${fdt_name}"
-if [ ! -f "${dtb_path}" ]; then
-	dtb_found="$(find "${dtb_dir}" -name "$3.dtb" 2>/dev/null | head -1)"
-	if [ -z "${dtb_found}" ]; then
-		echo "ERROR: DTB $3.dtb not found under ${dtbs_install_path}${kernel_version}" >&2
-		echo "       expected: ${dtb_path}" >&2
-		exit 1
-	fi
-	echo "WARNING: DTB found at ${dtb_found} instead of ${dtb_path}" >&2
+# NOTE: kernel_version (derived in rootfs-bootstrap.sh) drops the LOCALVERSION
+# suffix ("7.2.4", not "7.2.4-rockchip"), while the deb installs DTBs under
+# /usr/lib/linux-image-7.2.4-rockchip/. So do NOT build an exact path from
+# kernel_version — glob across every installed linux-image-* dir instead.
+dtb_found="$(find "${mount_point}/writable/usr/lib" -path "*linux-image-*/${fdt_name}" 2>/dev/null | head -1)"
+if [ -z "${dtb_found}" ]; then
+	echo "ERROR: DTB ${fdt_name} not found under any ${dtbs_install_path}* directory" >&2
+	echo "       searched: ${mount_point}/writable/usr/lib/*linux-image-*/${fdt_name}" >&2
+	exit 1
 fi
+echo "DTB check OK: ${dtb_found}"
 
 
 
