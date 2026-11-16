@@ -101,6 +101,15 @@ check MALI_BIFROST n REQUIRED
 check MALI_KBASE n WARN
 echo
 
+echo "== NPU (vendor rknpu for RKNN runtime) =="
+# librknnrt (RKNN models) talks to the vendor rknpu driver, not mainline rocket.
+check ROCKCHIP_RKNPU ym
+check IOMMU_API y
+check PM_DEVFREQ y
+check PM_OPP y
+check DRM_ACCEL_ROCKET ym WARN  # fallback only; bound only with the stock (non -rknpu) DTB
+echo
+
 echo "== Docker / reDroid =="
 check NAMESPACES y
 check PID_NS y

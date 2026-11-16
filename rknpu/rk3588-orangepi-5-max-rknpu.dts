@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Orange Pi 5 Max with the NPU wired for the vendor rknpu driver
+ * (librknnrt / librkllmrt, .rknn / .rkllm models) instead of mainline rocket.
+ *
+ * The stock rk3588-orangepi-5-max.dtb is left untouched as a rocket fallback:
+ * switch U_BOOT_FDT in /etc/default/u-boot and run u-boot-update.
+ */
+
+#include "rk3588-orangepi-5-max.dts"
+#include "rk3588-rknpu-vendor.dtsi"

@@ -173,6 +173,9 @@ CONFIG_VIDEO_ROCKCHIP_VDEC=m
 
 CONFIG_DRM_ACCEL=y
 CONFIG_DRM_ACCEL_ROCKET=m
+# Vendor RKNPU (drivers/rknpu, injected by rknpu/integrate-rknpu.sh) for librknnrt.
+# Binds only with rk3588-orangepi-5-max-rknpu.dtb; rocket binds with the stock DTB.
+CONFIG_ROCKCHIP_RKNPU=m
 
 # -------------------------------------------------------------
 # Chromium ハードウェアデコード向け追加

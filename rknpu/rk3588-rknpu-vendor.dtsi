@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * RK3588 NPU described the way the Rockchip vendor "rknpu" driver expects
+ * (one npu node for all 3 cores + ONE 4-bank IOMMU shared by the 3 cores),
+ * replacing the mainline per-core rocket nodes.
+ *
+ * Why: RKNN models (.rknn / .rkllm, e.g. from HuggingFace) only run through
+ * Rockchip's closed librknnrt / librkllmrt, which talk to the vendor rknpu
+ * DRM ioctl ABI. The mainline "rocket" accel driver uses a different ABI
+ * (Mesa Teflon / TFLite only) and cannot load .rknn files.
+ *
+ * Resources are copied from the vendor BSP rk3588s.dtsi as seen live on a
+ * production Orange Pi 5 Max (vendor 6.1 kernel), translated to the mainline
+ * dt-binding symbol names (the numeric clock/reset IDs differ between vendor
+ * and mainline headers, so never copy raw numbers).
+ *
+ * Include this AFTER the board dts (it deletes the rocket nodes and labels).
+ * Board must provide &vdd_npu_s0.
+ */
+
+/delete-node/ &rknn_core_0;
+/delete-node/ &rknn_core_1;
+/delete-node/ &rknn_core_2;
+/delete-node/ &rknn_mmu_0;
+/delete-node/ &rknn_mmu_1;
+/delete-node/ &rknn_mmu_2;
+
+/ {
+	rknpu: npu@fdab0000 {
+		compatible = "rockchip,rk3588-rknpu";
+		reg = <0x0 0xfdab0000 0x0 0x10000>,
+		      <0x0 0xfdac0000 0x0 0x10000>,
+		      <0x0 0xfdad0000 0x0 0x10000>;
+		interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "npu0_irq", "npu1_irq", "npu2_irq";
+		/*
+		 * clocks[0] MUST be the SCMI NPU clock and be named "scmi_clk":
+		 * rknpu_devfreq does devm_pm_opp_set_clkname(dev, "scmi_clk").
+		 */
+		clocks = <&scmi_clk SCMI_CLK_NPU>,
+			 <&cru ACLK_NPU0>, <&cru ACLK_NPU1>, <&cru ACLK_NPU2>,
+			 <&cru HCLK_NPU0>, <&cru HCLK_NPU1>, <&cru HCLK_NPU2>,
+			 <&cru PCLK_NPU_ROOT>;
+		clock-names = "scmi_clk", "aclk0", "aclk1", "aclk2",
+			      "hclk0", "hclk1", "hclk2", "pclk";
+		assigned-clocks = <&scmi_clk SCMI_CLK_NPU>;
+		assigned-clock-rates = <200000000>;
+		resets = <&cru SRST_A_RKNN0>, <&cru SRST_A_RKNN1>, <&cru SRST_A_RKNN2>,
+			 <&cru SRST_H_RKNN0>, <&cru SRST_H_RKNN1>, <&cru SRST_H_RKNN2>;
+		reset-names = "srst_a0", "srst_a1", "srst_a2",
+			      "srst_h0", "srst_h1", "srst_h2";
+		power-domains = <&power RK3588_PD_NPUTOP>,
+				<&power RK3588_PD_NPU1>,
+				<&power RK3588_PD_NPU2>;
+		power-domain-names = "npu0", "npu1", "npu2";
+		operating-points-v2 = <&rknpu_opp_table>;
+		iommus = <&rknpu_mmu>;
+		rknpu-supply = <&vdd_npu_s0>;
+		status = "okay";
+	};
+
+	/*
+	 * Generic (un-binned) voltages from the vendor table: no PVTM/leakage
+	 * selection on mainline, so use the safe "opp-microvolt" column.
+	 */
+	rknpu_opp_table: npu-opp-table {
+		compatible = "operating-points-v2";
+
+		opp-300000000 {
+			opp-hz = /bits/ 64 <300000000>;
+			opp-microvolt = <700000 700000 850000>;
+		};
+		opp-400000000 {
+			opp-hz = /bits/ 64 <400000000>;
+			opp-microvolt = <700000 700000 850000>;
+		};
+		opp-500000000 {
+			opp-hz = /bits/ 64 <500000000>;
+			opp-microvolt = <700000 700000 850000>;
+		};
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt = <700000 700000 850000>;
+		};
+		opp-700000000 {
+			opp-hz = /bits/ 64 <700000000>;
+			opp-microvolt = <700000 700000 850000>;
+		};
+		opp-800000000 {
+			opp-hz = /bits/ 64 <800000000>;
+			opp-microvolt = <750000 750000 850000>;
+		};
+		opp-900000000 {
+			opp-hz = /bits/ 64 <900000000>;
+			opp-microvolt = <800000 800000 850000>;
+		};
+		opp-1000000000 {
+			opp-hz = /bits/ 64 <1000000000>;
+			opp-microvolt = <850000 850000 850000>;
+		};
+	};
+
+	/*
+	 * One IOMMU with 4 banks for all 3 cores (core0 has 2 banks). The
+	 * mainline rockchip-iommu driver handles multi-bank (num_mmu) and
+	 * shared IRQs. No power-domains here (same as vendor): the rknpu
+	 * driver powers NPUTOP/NPU1/NPU2 itself before runtime-resuming the
+	 * IOMMU through the device link.
+	 */
+	rknpu_mmu: iommu@fdab9000 {
+		compatible = "rockchip,rk3588-iommu", "rockchip,rk3568-iommu";
+		reg = <0x0 0xfdab9000 0x0 0x100>,
+		      <0x0 0xfdaba000 0x0 0x100>,
+		      <0x0 0xfdaca000 0x0 0x100>,
+		      <0x0 0xfdada000 0x0 0x100>;
+		interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH 0>,
+			     <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH 0>;
+		interrupt-names = "npu0_mmu", "npu1_mmu", "npu2_mmu";
+		clocks = <&cru ACLK_NPU0>, <&cru ACLK_NPU1>, <&cru ACLK_NPU2>,
+			 <&cru HCLK_NPU0>, <&cru HCLK_NPU1>, <&cru HCLK_NPU2>;
+		clock-names = "aclk0", "aclk1", "aclk2",
+			      "iface0", "iface1", "iface2";
+		#iommu-cells = <0>;
+		status = "okay";
+	};
+};
+
+/*
+ * vdd_npu_s0 must never be switched off at runtime: dropping it between
+ * jobs hangs the whole SoC on the 2nd inference (seen with rknpu on
+ * mainline). pd_npu already uses it as domain-supply.
+ */
+&vdd_npu_s0 {
+	regulator-always-on;
+};

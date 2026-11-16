@@ -28,6 +28,13 @@ suite=$3
 #suite=resolute
 Uri=$2
 #Uri="http://ports.ubuntu.com/ubuntu-ports"
+# $4 = rootfs profile:
+#   desktop (default) - GNOME + gdm3 + oem-config (first user created on HDMI)
+#   server            - headless: openssh-server, default user (password must be
+#                       changed on first login), multi-user.target, no display manager
+profile=${4:-desktop}
+case "$profile" in desktop|server) ;; *) echo "unknown rootfs profile: $profile"; exit 1;; esac
+ROOTFS_USER=${ROOTFS_USER:-ubuntu}
 	debootstrap --arch=arm64 $suite arm64 $Uri
 
 export DEBIAN_FRONTEND=noninteractive
@@ -44,7 +51,11 @@ echo "nameserver 8.8.4.4" >> $1/etc/resolv.conf
 
 #sources.list setup
 rm $1/etc/hostname
-echo "ubuntu-desktop" > $1/etc/hostname
+if [ "$profile" = server ]; then
+	echo "ubuntu-server" > $1/etc/hostname
+else
+	echo "ubuntu-desktop" > $1/etc/hostname
+fi
 {
 echo "Types: deb"
 echo "URIs: $Uri"
@@ -114,6 +125,7 @@ systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get update
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get -y dist-upgrade
 # もし他のパッケージでも同じように止まった場合は同じパターンで：
 # echo 'パッケージ名 パッケージ名/質問キー boolean false' | debconf-set-selections
+if [ "$profile" = desktop ]; then
 systemd-nspawn -D $1 \
   --resolv-conf=replace-host \
   --as-pid2 \
@@ -122,6 +134,24 @@ systemd-nspawn -D $1 \
   /bin/bash -c "echo 'kdump-tools kdump-tools/use_kdump boolean false' | debconf-set-selections && \
   sudo apt-get -y install ubuntu-desktop-minimal gdm3 linux-firmware oem-config-gtk ubiquity-frontend-gtk ubiquity-slideshow-ubuntu yaru-theme-unity yaru-theme-icon yaru-theme-gtk aptdaemon initramfs-tools vim cloud-guest-utils e2fsprogs sudo"
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y gstreamer1.0-plugins-bad gstreamer1.0-plugins-good gstreamer1.0-tools clapper mpv vulkan-tools mesa-utils"
+else
+# Headless: no desktop meta-package, so pull in explicitly what it used to bring
+# (ssh, mesa runtime that the custom Mesa .debs below replace, GL/VK tools).
+systemd-nspawn -D $1 \
+  --resolv-conf=replace-host \
+  --as-pid2 \
+  --setenv=DEBIAN_FRONTEND=noninteractive \
+  --setenv=DEBCONF_NONINTERACTIVE_SEEN=true \
+  /bin/bash -c "echo 'kdump-tools kdump-tools/use_kdump boolean false' | debconf-set-selections && \
+  sudo apt-get -y install linux-firmware initramfs-tools vim cloud-guest-utils e2fsprogs sudo \
+  openssh-server ca-certificates curl wget less bash-completion htop pciutils usbutils locales tzdata \
+  python3-venv python3-pip \
+  libegl1 libgles2 libgl1 libgbm1 libegl-mesa0 libglx-mesa0 libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 \
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-good gstreamer1.0-tools vulkan-tools mesa-utils"
+fi
+# Chromium (xtradeb PPA, pinned above) + fonts: headless Chromium/Playwright on the
+# Panthor GPU (see /usr/local/bin/chromium-gpu-check below).
+systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "sudo apt-get install -y chromium fonts-liberation fonts-noto-cjk fonts-noto-color-emoji"
 
 # --- Networking / Bluetooth / container runtime (explicit, per porting checklist Section F) ---
 # Do not rely on the desktop meta-package to pull these in by accident.
@@ -190,6 +220,96 @@ systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get -y upgrad
 sed -i 's/#EXTRA_GROUPS=.*/EXTRA_GROUPS="video render docker"/g' $1/etc/adduser.conf
 sed -i 's/#ADD_EXTRA_GROUPS=.*/ADD_EXTRA_GROUPS=1/g' $1/etc/adduser.conf
 
+if [ "$profile" = server ]; then
+	# No HDMI/oem-config: ship a login user. Initial password = user name, expired
+	# so the first (SSH or serial) login must set a new one. Optional SSH keys:
+	# overlay/authorized_keys.
+	systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "\
+	  useradd -m -s /bin/bash -G sudo,adm,video,render,docker $ROOTFS_USER && \
+	  echo '$ROOTFS_USER:$ROOTFS_USER' | chpasswd && chage -d 0 $ROOTFS_USER"
+	if [ -f overlay/authorized_keys ]; then
+		install -d -m 0700 $1/home/$ROOTFS_USER/.ssh
+		install -m 0600 overlay/authorized_keys $1/home/$ROOTFS_USER/.ssh/authorized_keys
+		systemd-nspawn -D $1 --as-pid2 chown -R $ROOTFS_USER:$ROOTFS_USER /home/$ROOTFS_USER/.ssh
+	fi
+	# Every board flashed from this image must get its own SSH host keys.
+	cat > $1/etc/systemd/system/ssh-hostkeys-firstboot.service << 'EOF'
+[Unit]
+Description=Generate SSH host keys on first boot
+DefaultDependencies=no
+After=local-fs.target
+Before=ssh.service ssh.socket
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=sockets.target multi-user.target
+EOF
+	systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 /bin/bash -c "\
+	  systemctl enable ssh-hostkeys-firstboot.service && \
+	  { systemctl enable ssh.socket 2>/dev/null || systemctl enable ssh.service; } && \
+	  systemctl set-default multi-user.target"
+fi
+
+# Headless Chromium / Playwright on the GPU. Without X/Wayland Mesa EGL must use
+# the surfaceless platform (render node only); the ANGLE backend that works on
+# Panthor is picked on the board by `chromium-gpu-check --apply`.
+mkdir -p $1/etc/chromium.d/
+cat > $1/etc/chromium.d/opi5-gpu << 'EOF'
+if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then export EGL_PLATFORM=surfaceless; fi
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --ignore-gpu-blocklist --enable-gpu-rasterization"
+EOF
+cat > $1/usr/local/bin/chromium-gpu-check << 'EOF'
+#!/bin/bash
+# chromium-gpu-check [--apply] : which headless Chromium GPU mode reaches the Mali
+# GPU (WebGL UNMASKED_RENDERER must not be SwiftShader/llvmpipe).
+#   CHROME=<binary> to test another build (e.g. Playwright's chrome).
+# --apply writes the first working mode to /etc/chromium.d/opi5-gpu-mode (sudo).
+CHROME=${CHROME:-/usr/lib/chromium/chromium}
+[ -x "$CHROME" ] || CHROME=$(command -v chromium)
+export EGL_PLATFORM=${EGL_PLATFORM:-surfaceless}
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+cat > "$tmp/gl.html" << 'HTML'
+<html><body><pre id=o></pre><script>
+let o = 'NO-WEBGL';
+const gl = document.createElement('canvas').getContext('webgl2') ||
+           document.createElement('canvas').getContext('webgl');
+if (gl) {
+  const e = gl.getExtension('WEBGL_debug_renderer_info');
+  o = 'RENDERER=' + (e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) +
+      ' VERSION=' + gl.getParameter(gl.VERSION);
+}
+document.getElementById('o').textContent = o;
+</script></body></html>
+HTML
+modes=(
+  "vulkan|--use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan"
+  "gl-egl|--use-gl=angle --use-angle=gl-egl"
+  "gles-egl|--use-gl=angle --use-angle=gles-egl"
+)
+win=""
+for m in "${modes[@]}"; do
+  name=${m%%|*}; flags=${m#*|}
+  out=$(timeout 60 "$CHROME" --headless=new --no-first-run --ignore-gpu-blocklist --enable-gpu \
+        --enable-gpu-rasterization $flags --virtual-time-budget=5000 \
+        --dump-dom "file://$tmp/gl.html" 2>/dev/null | grep -o 'RENDERER=[^<]*\|NO-WEBGL')
+  if echo "$out" | grep -q 'RENDERER=' && ! echo "$out" | grep -qiE 'swiftshader|llvmpipe|softpipe|lavapipe'; then
+    echo "[ GPU ] $name: $out"; [ -n "$win" ] || win="$flags"
+  else
+    echo "[ SW  ] $name: ${out:-no output}"
+  fi
+done
+if [ -z "$win" ]; then echo "FAIL: no hardware WebGL in headless Chromium"; exit 1; fi
+echo "PASS: use flags: $win"
+if [ "$1" = "--apply" ]; then
+  echo "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS $win\"" | sudo tee /etc/chromium.d/opi5-gpu-mode
+fi
+EOF
+chmod 0755 $1/usr/local/bin/chromium-gpu-check
+
 
 # kernel
 mkdir $1/kkk && rm -f overlay/libdrm-dev_*.deb overlay/libegl1-mesa-dev_*.deb overlay/libgbm-dev_*.deb && \
@@ -198,12 +318,26 @@ rm -f overlay/mesa-opencl-icd_*.deb overlay/mesa-teflon-delegate_*.deb overlay/m
 rm -f overlay/libdrm-tests_*.deb && cp overlay/*.deb $1/kkk && cp -r kernel $1/kkk
 
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo /bin/bash -c "sudo apt-get -y purge \$(dpkg --list | grep -Ei 'linux-image|linux-headers|linux-modules|linux-rockchip' | awk '{ print \$2 }')"
-systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo /bin/bash -c "cd kkk && sudo dpkg -i *.deb && sudo dpkg -i kernel/*.deb"
+# Custom Mesa/libdrm: let apt resolve any runtime deps from the archive (the server
+# profile lacks the desktop's implicit ones), never remove packages, and allow the
+# "~panthor1" versions that sort below the archive build. Fall back to plain dpkg.
+# Then hold them so a later `apt upgrade` cannot swap the archive Mesa back in.
+systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo /bin/bash -c "cd kkk && \
+  { sudo apt-get install -y --no-remove --allow-downgrades ./*.deb || sudo dpkg -i *.deb; } && \
+  sudo apt-mark hold \$(for f in *.deb; do dpkg-deb -f \$f Package; done) && \
+  sudo dpkg -i kernel/*.deb"
 #&& sudo dpkg -i kernel/*conservative*.deb && sudo dpkg -i kernel/*ondemand*.deb"
 
 rm -rf $1/kkk
 kernel_version="`ls -1 $1/boot/vmlinu?-*|sed 's#-# #g' | awk '{ print $2 }'|head -1`"
 echo "kernel_version=$kernel_version" > overlay/kernel_version
+# Rockchip NPU user space (librknnrt / librkllmrt / rknn-toolkit-lite2) for the
+# vendor rknpu driver that build-kernel.sh compiled in.
+if [ -f rknpu/install-rknn-runtime.sh ]; then
+	# librkllmrt.so needs libgomp.so.1 (librknnrt only libstdc++/libc).
+	systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get -y install libgomp1
+	bash rknpu/install-rknn-runtime.sh $1
+fi
 # install U-Boot
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 sudo apt-get -y install u-boot-tools u-boot-menu
 
@@ -225,6 +359,8 @@ true > $1/etc/machine-id
 touch $1/var/log/syslog
 chown root:adm $1/var/log/syslog
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 ssh-keygen -A
+# server: host keys are created per board by ssh-hostkeys-firstboot.service
+if [ "$profile" = server ]; then rm -f $1/etc/ssh/ssh_host_*; fi
 # debug
 echo "linux-version"
 systemd-nspawn -D $1 --resolv-conf=replace-host --as-pid2 linux-version list

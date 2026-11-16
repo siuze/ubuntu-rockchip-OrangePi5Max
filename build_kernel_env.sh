@@ -82,6 +82,8 @@ if [ $4 == "kernel" ]; then
 # kernel
 cp build-kernel.sh arm64
 cp overlay/my-add.txt arm64
+# Optional vendor RKNPU integration (consumed by build-kernel.sh as /rknpu).
+if [ -d rknpu ]; then rm -rf arm64/rknpu; cp -r rknpu arm64/; fi
 chmod +x arm64/build-kernel.sh
 
 systemd-nspawn -D arm64 \
@@ -89,6 +91,8 @@ systemd-nspawn -D arm64 \
   --as-pid2 \
   --setenv=DEBIAN_FRONTEND=noninteractive \
   --setenv=DEBCONF_NONINTERACTIVE_SEEN=true \
+  --setenv=LINUX_SERIES=${LINUX_SERIES:-7.3} \
+  ${MINIMYTH2_REF:+--setenv=MINIMYTH2_REF=$MINIMYTH2_REF} \
 /bin/bash -c "./build-kernel.sh kernel"
 
 mkdir -p kernel
